@@ -1,1 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VoiceChat.audio - Simple Voice Chat</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="home-container">
+        <header>
+            <div class="logo">
+                <i class="fas fa-wave-square"></i>
+                <h1>VoiceChat.audio</h1>
+            </div>
+            <p class="tagline">Dead-simple voice chat. No signups. No fuss.</p>
+        </header>
 
+        <main class="hero">
+            <h2>Talk with anyone, instantly</h2>
+            <p>Create a room, share the link, and start talking. Works on mobile and desktop.</p>
+            
+            <div class="cta-section">
+                <button id="createRoomBtn" class="btn btn-primary">
+                    <i class="fas fa-plus-circle"></i>
+                    Create New Room
+                </button>
+                
+                <div class="divider">
+                    <span>or</span>
+                </div>
+                
+                <div class="join-section">
+                    <p>Have a room code?</p>
+                    <div class="join-input-group">
+                        <input 
+                            type="text" 
+                            id="roomCodeInput" 
+                            placeholder="ABC-123" 
+                            maxlength="7"
+                            autocomplete="off"
+                        >
+                        <button id="joinRoomBtn" class="btn btn-secondary">
+                            <i class="fas fa-sign-in-alt"></i>
+                            Join
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <div class="features">
+            <div class="feature">
+                <i class="fas fa-bolt"></i>
+                <h3>Instant Setup</h3>
+                <p>No accounts, no signups. Just click and talk.</p>
+            </div>
+            <div class="feature">
+                <i class="fas fa-mobile-alt"></i>
+                <h3>Mobile Friendly</h3>
+                <p>Works perfectly on phones, tablets, and desktops.</p>
+            </div>
+            <div class="feature">
+                <i class="fas fa-shield-alt"></i>
+                <h3>Private & Secure</h3>
+                <p>Rooms auto-delete when everyone leaves. No recording.</p>
+            </div>
+        </div>
+
+        <footer class="footer">
+            <p>Simple voice chat for up to 8 people. Rooms expire after 1 hour of inactivity.</p>
+            <div class="theme-toggle">
+                <button id="themeToggle" class="btn btn-secondary">
+                    <i class="fas fa-moon"></i> Dark Mode
+                </button>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Loading Modal -->
+    <div id="loadingModal" class="modal">
+        <div class="modal-content">
+            <div class="spinner"></div>
+            <h3>Creating your room...</h3>
+            <p>This will just take a moment</p>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
