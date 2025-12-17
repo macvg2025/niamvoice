@@ -1,14 +1,18 @@
-
 // Room State
 let localStream = null;
 let isMuted = false;
 let isSpeaking = false;
 let roomCode = '';
-let participants = new Map(); // participantId -> {name, isSpeaking, isMuted}
+let participants = new Map(); // participantId -> {name, isSpeaking, isMuted, audioElement}
 let localParticipantId = generateId();
 let audioContext = null;
 let analyser = null;
 let speakingThreshold = -45; // dB threshold for speech
+
+// WebRTC Configuration
+const SIGNALING_SERVER = 'wss://niamvoice-signaling.onrender.com'; // Change to your Render URL
+let signalingSocket = null;
+let peerConnections = new Map(); // peerId -> RTCPeerConnection
 
 // DOM Elements
 const roomCodeDisplay = document.getElementById('roomCodeDisplay');
@@ -181,7 +185,8 @@ async function initMicrophone() {
                 echoCancellation: true,
                 noiseSuppression: true,
                 autoGainControl: true
-            }
+            },
+            video: false
         });
         
         console.log('Microphone access granted');
@@ -246,7 +251,15 @@ function checkSpeakingLevel() {
             updateParticipantUI(localParticipantId);
             updateMicCircle();
             
-            // In real app, broadcast speaking state to others via Supabase
+            // Broadcast speaking state to others
+            if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
+                signalingSocket.send(JSON.stringify({
+                    type: 'speaking',
+                    roomId: roomCode.replace('-', ''),
+                    peerId: localParticipantId,
+                    value: isSpeaking
+                }));
+            }
         }
     }
     
@@ -296,6 +309,15 @@ async function changeAudioDevice(deviceId) {
             }
         });
         
+        // Update all existing peer connections
+        peerConnections.forEach((pc, peerId) => {
+            const senders = pc.getSenders();
+            const audioSender = senders.find(sender => sender.track && sender.track.kind === 'audio');
+            if (audioSender && localStream.getAudioTracks().length > 0) {
+                audioSender.replaceTrack(localStream.getAudioTracks()[0]);
+            }
+        });
+        
         // Restart audio analysis
         if (audioContext) {
             audioContext.close();
@@ -331,12 +353,20 @@ function toggleMute() {
     updateMuteButton();
     updateMicCircle();
     
-    // In real app, broadcast mute state to others via Supabase
+    // Broadcast mute state to others
+    if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
+        signalingSocket.send(JSON.stringify({
+            type: 'mute',
+            roomId: roomCode.replace('-', ''),
+            peerId: localParticipantId,
+            value: isMuted
+        }));
+    }
 }
 
 // Copy room link to clipboard
 function copyRoomLink() {
-    const url = `${window.location.origin}/room.html?room=${roomCode.replace('-', '')}`;
+    const url = `${window.location.origin}${window.location.pathname.replace('index.html', 'room.html')}?room=${roomCode.replace('-', '')}`;
     
     navigator.clipboard.writeText(url).then(() => {
         showToast('Room link copied to clipboard!');
@@ -352,6 +382,264 @@ function copyRoomLink() {
     });
 }
 
+// ==================== WEBRTC FUNCTIONS ====================
+
+// Initialize WebRTC signaling connection
+function initSignaling() {
+    if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
+        signalingSocket.close();
+    }
+    
+    signalingSocket = new WebSocket(SIGNALING_SERVER);
+    
+    signalingSocket.onopen = () => {
+        console.log('✅ Connected to signaling server');
+        connectionStatus.innerHTML = '<i class="fas fa-circle"></i> Connected';
+        
+        // Join the room
+        signalingSocket.send(JSON.stringify({
+            type: 'join',
+            roomId: roomCode.replace('-', ''),
+            peerId: localParticipantId
+        }));
+    };
+    
+    signalingSocket.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            console.log('📨 Signal:', data.type);
+            
+            switch (data.type) {
+                case 'peers':
+                    // Connect to existing peers in room
+                    data.peers.forEach(peerId => {
+                        if (peerId !== localParticipantId && !peerConnections.has(peerId)) {
+                            createPeerConnection(peerId);
+                        }
+                    });
+                    break;
+                    
+                case 'new-peer':
+                    // New peer joined the room
+                    if (data.peerId !== localParticipantId && !peerConnections.has(data.peerId)) {
+                        createPeerConnection(data.peerId);
+                    }
+                    break;
+                    
+                case 'signal':
+                    // Handle WebRTC signaling message
+                    handleSignal(data.from, data.signal);
+                    break;
+                    
+                case 'peer-left':
+                    // Peer disconnected
+                    removePeerConnection(data.peerId);
+                    break;
+                    
+                case 'mute':
+                    // Update peer's mute status
+                    updatePeerMute(data.peerId, data.value);
+                    break;
+                    
+                case 'speaking':
+                    // Update peer's speaking status
+                    updatePeerSpeaking(data.peerId, data.value);
+                    break;
+            }
+        } catch (error) {
+            console.error('Error handling message:', error);
+        }
+    };
+    
+    signalingSocket.onclose = () => {
+        console.log('❌ Disconnected from signaling server');
+        connectionStatus.innerHTML = '<i class="fas fa-circle"></i> Reconnecting...';
+        
+        // Try to reconnect after 3 seconds
+        setTimeout(initSignaling, 3000);
+    };
+    
+    signalingSocket.onerror = (error) => {
+        console.error('WebSocket error:', error);
+    };
+}
+
+// Create a WebRTC connection with another peer
+function createPeerConnection(peerId) {
+    console.log(`Creating connection with ${peerId}`);
+    
+    // Create RTCPeerConnection
+    const pc = new RTCPeerConnection({
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' }
+        ]
+    });
+    
+    peerConnections.set(peerId, pc);
+    
+    // Add local stream
+    if (localStream) {
+        localStream.getTracks().forEach(track => {
+            pc.addTrack(track, localStream);
+        });
+    }
+    
+    // Handle incoming track (audio from remote peer)
+    pc.ontrack = (event) => {
+        console.log(`Received audio track from ${peerId}`);
+        
+        // Create audio element for remote stream
+        const audio = new Audio();
+        audio.srcObject = event.streams[0];
+        audio.autoplay = true;
+        audio.volume = 1.0;
+        
+        // Add to participants
+        if (!participants.has(peerId)) {
+            participants.set(peerId, {
+                name: `User${peerId.substring(0, 4)}`,
+                isSpeaking: false,
+                isMuted: false,
+                audioElement: audio
+            });
+            updateParticipantsUI();
+        } else {
+            participants.get(peerId).audioElement = audio;
+        }
+    };
+    
+    // Handle ICE candidates
+    pc.onicecandidate = (event) => {
+        if (event.candidate && signalingSocket.readyState === WebSocket.OPEN) {
+            signalingSocket.send(JSON.stringify({
+                type: 'signal',
+                roomId: roomCode.replace('-', ''),
+                from: localParticipantId,
+                to: peerId,
+                signal: {
+                    type: 'candidate',
+                    candidate: event.candidate
+                }
+            }));
+        }
+    };
+    
+    pc.oniceconnectionstatechange = () => {
+        console.log(`ICE state for ${peerId}: ${pc.iceConnectionState}`);
+        
+        if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+            // Try to restart ICE
+            setTimeout(() => {
+                if (pc.iceConnectionState !== 'connected' && pc.iceConnectionState !== 'checking') {
+                    pc.restartIce();
+                }
+            }, 1000);
+        }
+    };
+    
+    // If we're initiating the connection, create an offer
+    if (peerId > localParticipantId) { // Simple way to decide who initiates
+        createOffer(peerId, pc);
+    }
+}
+
+// Create WebRTC offer
+async function createOffer(peerId, pc) {
+    try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        
+        signalingSocket.send(JSON.stringify({
+            type: 'signal',
+            roomId: roomCode.replace('-', ''),
+            from: localParticipantId,
+            to: peerId,
+            signal: {
+                type: 'offer',
+                sdp: offer.sdp
+            }
+        }));
+    } catch (error) {
+        console.error('Error creating offer:', error);
+    }
+}
+
+// Handle incoming WebRTC signals
+async function handleSignal(from, signal) {
+    const pc = peerConnections.get(from);
+    if (!pc) {
+        console.log(`No connection found for ${from}, creating one...`);
+        createPeerConnection(from);
+        return;
+    }
+    
+    try {
+        if (signal.type === 'offer') {
+            await pc.setRemoteDescription(new RTCSessionDescription(signal));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            
+            signalingSocket.send(JSON.stringify({
+                type: 'signal',
+                roomId: roomCode.replace('-', ''),
+                from: localParticipantId,
+                to: from,
+                signal: {
+                    type: 'answer',
+                    sdp: answer.sdp
+                }
+            }));
+        } else if (signal.type === 'answer') {
+            await pc.setRemoteDescription(new RTCSessionDescription(signal));
+        } else if (signal.type === 'candidate') {
+            await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+        }
+    } catch (error) {
+        console.error('Error handling signal:', error);
+    }
+}
+
+// Remove peer connection
+function removePeerConnection(peerId) {
+    const pc = peerConnections.get(peerId);
+    if (pc) {
+        pc.close();
+        peerConnections.delete(peerId);
+    }
+    
+    // Remove from participants
+    if (participants.has(peerId)) {
+        const participant = participants.get(peerId);
+        if (participant.audioElement) {
+            participant.audioElement.pause();
+            participant.audioElement.srcObject = null;
+        }
+        participants.delete(peerId);
+        updateParticipantsUI();
+    }
+}
+
+// Update peer's mute status
+function updatePeerMute(peerId, isMuted) {
+    const participant = participants.get(peerId);
+    if (participant) {
+        participant.isMuted = isMuted;
+        updateParticipantUI(peerId);
+    }
+}
+
+// Update peer's speaking status
+function updatePeerSpeaking(peerId, isSpeaking) {
+    const participant = participants.get(peerId);
+    if (participant) {
+        participant.isSpeaking = isSpeaking;
+        updateParticipantUI(peerId);
+    }
+}
+
+// ==================== ROOM INITIALIZATION ====================
+
 // Initialize room
 async function initRoom() {
     roomCode = getRoomCodeFromURL();
@@ -362,7 +650,8 @@ async function initRoom() {
     participants.set(localParticipantId, {
         name: 'You',
         isSpeaking: false,
-        isMuted: false
+        isMuted: false,
+        audioElement: null
     });
     
     updateParticipantsUI();
@@ -373,41 +662,39 @@ async function initRoom() {
         setupAudioAnalysis();
         populateAudioDevices();
         updateMuteButton();
+        
+        // Initialize signaling connection
+        initSignaling();
     }
-    
-    // Simulate other participants (for demo)
-    setTimeout(() => {
-        // Add demo participants
-        const demoParticipants = [
-            { id: generateId(), name: 'Alex', isSpeaking: false, isMuted: false },
-            { id: generateId(), name: 'Sam', isSpeaking: true, isMuted: false },
-            { id: generateId(), name: 'Jordan', isSpeaking: false, isMuted: true }
-        ];
-        
-        demoParticipants.forEach(p => {
-            participants.set(p.id, p);
-        });
-        
-        updateParticipantsUI();
-        
-        // Simulate speaking changes
-        setInterval(() => {
-            demoParticipants.forEach(p => {
-                const participant = participants.get(p.id);
-                if (participant && !participant.isMuted) {
-                    participant.isSpeaking = Math.random() > 0.7;
-                    updateParticipantUI(p.id);
-                }
-            });
-        }, 3000);
-    }, 2000);
 }
 
-// Event Listeners
+// ==================== EVENT LISTENERS ====================
+
 copyLinkBtn.addEventListener('click', copyRoomLink);
 
 leaveRoomBtn.addEventListener('click', () => {
     if (confirm('Leave this voice room?')) {
+        // Send leave message
+        if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
+            signalingSocket.send(JSON.stringify({
+                type: 'leave',
+                roomId: roomCode.replace('-', ''),
+                peerId: localParticipantId
+            }));
+            signalingSocket.close();
+        }
+        
+        // Close all peer connections
+        peerConnections.forEach((pc, peerId) => {
+            pc.close();
+        });
+        
+        // Stop local stream
+        if (localStream) {
+            localStream.getTracks().forEach(track => track.stop());
+        }
+        
+        // Redirect to home
         window.location.href = 'index.html';
     }
 });
@@ -451,16 +738,20 @@ document.addEventListener('keydown', (e) => {
 // Initialize when page loads
 document.addEventListener('DOMContentLoaded', () => {
     initRoom();
-    
-    // Show connection tip
-    setTimeout(() => {
-        console.log('Demo mode: For real voice chat, Supabase backend is required.');
-        console.log('See README.md for setup instructions.');
-    }, 1000);
 });
 
 // Clean up on page unload
 window.addEventListener('beforeunload', () => {
+    // Send leave message
+    if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
+        signalingSocket.send(JSON.stringify({
+            type: 'leave',
+            roomId: roomCode.replace('-', ''),
+            peerId: localParticipantId
+        }));
+    }
+    
+    // Close all connections
     if (localStream) {
         localStream.getTracks().forEach(track => track.stop());
     }
@@ -468,4 +759,6 @@ window.addEventListener('beforeunload', () => {
     if (audioContext) {
         audioContext.close();
     }
+    
+    peerConnections.forEach(pc => pc.close());
 });
