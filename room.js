@@ -10,7 +10,7 @@ let analyser = null;
 let speakingThreshold = -45; // dB threshold for speech
 
 // WebRTC Configuration
-const SIGNALING_SERVER = 'wss://niamvoice-signaling.onrender.com'; // Change to your Render URL
+const SIGNALING_SERVER = 'https://niamvoice-signaling.onrender.com'; // Change to your Render URL
 let signalingSocket = null;
 let peerConnections = new Map(); // peerId -> RTCPeerConnection
 
